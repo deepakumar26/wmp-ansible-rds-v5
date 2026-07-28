@@ -1,3 +1,23 @@
+# - name: Install Golang
+#   ansible.builtin.dnf:
+#     name: golang
+#     state: present
+
+# - name: Include pre-reqs
+#   ansible.builtin.include_role:
+#     name: common
+#     tasks_from: pre-reqs
+
+# - name: Build application
+#   ansible.builtin.shell: CGO_ENABLED=0 go build -o auth-service ./cmd/server
+#   args:
+#     chdir: /app
+
+# - name: Include systemd
+#   ansible.builtin.include_role:
+#     name: common
+#     tasks_from: systemd
+
 - name: Install Golang
   ansible.builtin.dnf:
     name: golang
@@ -8,10 +28,96 @@
     name: common
     tasks_from: pre-reqs
 
-- name: Build application
-  ansible.builtin.shell: CGO_ENABLED=0 go build -o auth-service ./cmd/server
+- name: Verify go.mod exists
+  ansible.builtin.stat:
+    path: /app/go.mod
+  register: auth_go_mod
+
+- name: Fail when go.mod is missing
+  ansible.builtin.assert:
+    that:
+      - auth_go_mod.stat.exists
+      - auth_go_mod.stat.isreg
+    fail_msg: "go.mod is missing from /app. Verify the application archive structure."
+    success_msg: "go.mod found in /app."
+
+- name: Create Go cache directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - /var/cache/go
+    - /var/cache/go/pkg
+    - /var/cache/go/pkg/mod
+    - /var/cache/go-build
+
+- name: Display Go version
+  ansible.builtin.command:
+    cmd: go version
+  register: go_version
+  changed_when: false
+
+- name: Print Go version
+  ansible.builtin.debug:
+    var: go_version.stdout
+
+- name: Download Go dependencies
+  ansible.builtin.command:
+    cmd: go mod download
   args:
     chdir: /app
+  environment:
+    HOME: /root
+    GOPATH: /var/cache/go
+    GOMODCACHE: /var/cache/go/pkg/mod
+    GOCACHE: /var/cache/go-build
+    CGO_ENABLED: "0"
+  register: go_dependencies
+  changed_when: false
+
+- name: Build application
+  ansible.builtin.command:
+    cmd: go build -trimpath -buildvcs=false -o auth-service ./cmd/server
+  args:
+    chdir: /app
+  environment:
+    HOME: /root
+    GOPATH: /var/cache/go
+    GOMODCACHE: /var/cache/go/pkg/mod
+    GOCACHE: /var/cache/go-build
+    CGO_ENABLED: "0"
+  register: auth_build
+
+- name: Display build output
+  ansible.builtin.debug:
+    msg:
+      - "Build return code: {{ auth_build.rc }}"
+      - "Build stdout: {{ auth_build.stdout_lines | default([]) }}"
+      - "Build stderr: {{ auth_build.stderr_lines | default([]) }}"
+
+- name: Verify application binary
+  ansible.builtin.stat:
+    path: /app/auth-service
+  register: auth_service_binary
+
+- name: Fail when application binary is missing
+  ansible.builtin.assert:
+    that:
+      - auth_service_binary.stat.exists
+      - auth_service_binary.stat.isreg
+      - auth_service_binary.stat.executable
+    fail_msg: "The /app/auth-service binary was not created successfully."
+    success_msg: "The auth-service binary was built successfully."
+
+- name: Set application binary ownership
+  ansible.builtin.file:
+    path: /app/auth-service
+    owner: appuser
+    group: appuser
+    mode: "0755"
 
 - name: Include systemd
   ansible.builtin.include_role:
